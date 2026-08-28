@@ -4,9 +4,10 @@
 두 가지 모드로 동작한다:
 1) 로컬 개발용: 그냥 로컬 SQLite 파일 (기본값, 아무 환경변수 없이 실행하면 이 모드)
 2) 배포용(Turso): 환경변수 TURSO_DATABASE_URL / TURSO_AUTH_TOKEN 이 설정되어 있으면
-   Turso(libSQL, 무료 클라우드 DB)와 동기화되는 임베디드 복제본을 사용한다.
-   이러면 Streamlit Community Cloud처럼 파일시스템이 재시작마다 초기화되는 환경에서도
-   데이터가 안전하게 보존되고, 다른 기기에서 접속해도 같은 데이터를 본다.
+   Turso(libSQL, 무료 클라우드 DB)에 매 요청마다 직접 연결한다.
+   (참고: 로컬 파일에 캐시해뒀다가 동기화하는 "임베디드 복제본" 방식은 한동안 안 쓰다가
+   다시 쓰면 "stream not found" 에러가 나는 등 아직 불안정해서, 대신 매번 원격에 바로
+   붙는 단순한 방식을 쓴다. 이 앱 정도 트래픽에서는 속도 차이가 거의 없다.)
 """
 import os
 import sqlite3
@@ -16,7 +17,6 @@ TURSO_URL = os.environ.get("TURSO_DATABASE_URL", "")
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "")
 USE_TURSO = bool(TURSO_URL and TURSO_TOKEN)
 
-LOCAL_REPLICA_PATH = Path(__file__).parent / "rocket_growth_replica.db"
 LOCAL_DB_PATH = Path(__file__).parent / "rocket_growth.db"
 
 if USE_TURSO:
@@ -25,17 +25,12 @@ if USE_TURSO:
 
 def get_conn():
     """
-    Turso 모드: 로컬 임베디드 복제본에 연결하고, 매번 원격과 동기화한다.
+    Turso 모드: 로컬 캐시 없이 매번 원격 DB에 직접 연결한다.
     로컬 모드: 평범한 sqlite3 연결.
     두 경우 모두 '?' 플레이스홀더의 표준 DBAPI2 스타일로 사용 가능.
     """
     if USE_TURSO:
-        conn = libsql.connect(
-            str(LOCAL_REPLICA_PATH),
-            sync_url=TURSO_URL,
-            auth_token=TURSO_TOKEN,
-        )
-        conn.sync()
+        conn = libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
         return conn
     conn = sqlite3.connect(LOCAL_DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -44,10 +39,8 @@ def get_conn():
 
 
 def commit(conn):
-    """Turso 모드에서는 commit 후 반드시 sync 해서 원격에 반영한다."""
+    """원격 직접 연결 모드에서는 conn.commit()만으로 충분하다 (별도 동기화 불필요)."""
     conn.commit()
-    if USE_TURSO:
-        conn.sync()
 
 
 def fetchall_dict(cur):
