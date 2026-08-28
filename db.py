@@ -86,10 +86,17 @@ def init_db():
         size_tag TEXT,                      -- 사이즈 (극소/소/중/대 등)
         strategic BOOLEAN DEFAULT 0,        -- 전략상품 여부
         discontinued BOOLEAN DEFAULT 0,     -- 단종 여부
+        registration_status TEXT DEFAULT '등록대기', -- 등록대기 / 등록완료
         memo TEXT,                          -- 발주메모
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_products_product_code ON products(product_code)")
+
+    # 이미 만들어진 DB에는 registration_status 컬럼이 없을 수 있으므로 안전하게 추가 시도
+    try:
+        cur.execute("ALTER TABLE products ADD COLUMN registration_status TEXT DEFAULT '등록대기'")
+    except Exception:
+        pass  # 이미 컬럼이 있으면 에러 무시
 
     # 쿠팡 재고/판매 스냅샷 (원본 '쿠팡업로드상품' 시트 대응, 쿠팡 다운로드 파일로 매번 갱신)
     cur.execute("""
