@@ -294,12 +294,128 @@ elif page == "상품 마스터":
     products = pd.read_sql_query("SELECT * FROM products ORDER BY product_code", conn)
     conn.close()
 
-    tab1, tab2 = st.tabs(["목록 조회", "엑셀로 가져오기"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["목록 조회", "개별 등록/수정", "삭제", "엑셀 가져오기/내보내기"]
+    )
 
+    # --- 목록 조회 ---
     with tab1:
-        st.dataframe(products, use_container_width=True, height=500)
+        status_filter = st.multiselect(
+            "등록상태 필터", ["등록대기", "등록완료"], default=["등록대기", "등록완료"]
+        )
+        view = products[products["registration_status"].isin(status_filter)] if not products.empty else products
+        st.dataframe(view, use_container_width=True, height=500)
+        st.caption(f"전체 {len(products)}건 중 {len(view)}건 표시")
 
+    # --- 개별 등록/수정 ---
     with tab2:
+        st.write("옵션코드가 이미 있으면 수정, 없으면 새로 등록됩니다.")
+
+        existing_codes = products["option_code"].tolist() if not products.empty else []
+        edit_target = st.selectbox(
+            "기존 상품 불러와서 수정하기 (선택 안 하면 신규 등록)",
+            options=[""] + existing_codes,
+        )
+
+        if edit_target:
+            row = products[products["option_code"] == edit_target].iloc[0]
+        else:
+            row = None
+
+        def val(col, default=""):
+            if row is not None:
+                v = row.get(col)
+                return v if v is not None else default
+            return default
+
+        with st.form("product_form", clear_on_submit=False):
+            c1, c2 = st.columns(2)
+            option_code = c1.text_input("옵션코드 *", value=val("option_code"), disabled=bool(edit_target))
+            product_code = c2.text_input("상품코드 *", value=val("product_code"))
+            product_name = c1.text_input("상품명", value=val("product_name"))
+            option_name = c2.text_input("옵션명", value=val("option_name"))
+            set_qty = c1.number_input("구성개수", min_value=1, value=int(val("set_qty", 1) or 1))
+            size_tag = c2.text_input("사이즈", value=val("size_tag"))
+            price_cny = c1.number_input("가격(위안화)", min_value=0.0, value=float(val("price_cny", 0.0) or 0.0), step=0.1)
+            supplier_name_cn = c2.text_input("업체명(중문)", value=val("supplier_name_cn"))
+            product_name_cn = c1.text_input("제품명(중문)", value=val("product_name_cn"))
+            option_name_cn = c2.text_input("옵션명(중문)", value=val("option_name_cn"))
+            supplier_1688_url = st.text_input("1688주소", value=val("supplier_1688_url"))
+            image_url = st.text_input("이미지주소(발주)", value=val("image_url"))
+            memo = st.text_input("발주메모", value=val("memo"))
+
+            c3, c4, c5 = st.columns(3)
+            reg_status = c3.selectbox(
+                "등록상태", ["등록대기", "등록완료"],
+                index=(["등록대기", "등록완료"].index(val("registration_status", "등록대기"))
+                       if val("registration_status", "등록대기") in ["등록대기", "등록완료"] else 0),
+            )
+            strategic = c4.checkbox("전략상품", value=bool(val("strategic", 0)))
+            discontinued = c5.checkbox("단종", value=bool(val("discontinued", 0)))
+
+            submitted = st.form_submit_button("저장", type="primary")
+
+        if submitted:
+            if not option_code or not product_code:
+                st.error("옵션코드와 상품코드는 필수입니다.")
+            else:
+                conn = get_conn()
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO products (
+                        option_code, product_code, product_name, option_name, set_qty,
+                        size_tag, price_cny, supplier_name_cn, product_name_cn, option_name_cn,
+                        supplier_1688_url, image_url, memo, registration_status, strategic, discontinued
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(option_code) DO UPDATE SET
+                        product_code=excluded.product_code,
+                        product_name=excluded.product_name,
+                        option_name=excluded.option_name,
+                        set_qty=excluded.set_qty,
+                        size_tag=excluded.size_tag,
+                        price_cny=excluded.price_cny,
+                        supplier_name_cn=excluded.supplier_name_cn,
+                        product_name_cn=excluded.product_name_cn,
+                        option_name_cn=excluded.option_name_cn,
+                        supplier_1688_url=excluded.supplier_1688_url,
+                        image_url=excluded.image_url,
+                        memo=excluded.memo,
+                        registration_status=excluded.registration_status,
+                        strategic=excluded.strategic,
+                        discontinued=excluded.discontinued
+                """, (
+                    option_code, product_code, product_name, option_name, int(set_qty),
+                    size_tag, float(price_cny), supplier_name_cn, product_name_cn, option_name_cn,
+                    supplier_1688_url, image_url, memo, reg_status, strategic, discontinued,
+                ))
+                db_commit(conn)
+                conn.close()
+                st.success(f"{option_code} 저장 완료.")
+                st.rerun()
+
+    # --- 삭제 ---
+    with tab3:
+        if products.empty:
+            st.info("등록된 상품이 없습니다.")
+        else:
+            to_delete = st.multiselect(
+                "삭제할 옵션코드 선택 (여러 개 선택 가능)",
+                options=products["option_code"].tolist(),
+            )
+            st.warning("삭제하면 되돌릴 수 없습니다. 신중하게 선택하세요.")
+            if st.button("선택한 상품 삭제", type="secondary", disabled=not to_delete):
+                conn = get_conn()
+                cur = conn.cursor()
+                for code in to_delete:
+                    cur.execute("DELETE FROM products WHERE option_code = ?", (code,))
+                db_commit(conn)
+                conn.close()
+                st.success(f"{len(to_delete)}건 삭제되었습니다.")
+                st.rerun()
+
+    # --- 엑셀 가져오기/내보내기 ---
+    with tab4:
+        st.subheader("엑셀로 일괄 가져오기")
         st.write(
             "기존 워크북의 **'단일상품'** 시트와 같은 형식(상품코드, 옵션코드, 구성개수, 상품명, "
             "옵션명, 이미지주소(발주), 1688주소, 업체명, 제품명(중문), 옵션명(중문), 가격(위안화), "
@@ -313,6 +429,31 @@ elif page == "상품 마스터":
                 st.rerun()
             except Exception as e:
                 st.error(f"가져오기 실패: {e}")
+
+        st.divider()
+        st.subheader("등록대기 상품 내보내기 (쿠팡 업로드용)")
+        st.write("등록상태가 '등록대기'인 상품만 모아서 엑셀로 내려받습니다. 쿠팡 윙에 올릴 때 참고용으로 쓰세요.")
+        pending = products[products["registration_status"] == "등록대기"] if not products.empty else products
+        st.write(f"등록대기 상품: {len(pending)}건")
+        if not pending.empty:
+            export_cols = [
+                "option_code", "product_code", "product_name", "option_name",
+                "set_qty", "size_tag", "price_cny", "image_url", "memo",
+            ]
+            export_df = pending[export_cols].rename(columns={
+                "option_code": "옵션코드", "product_code": "상품코드",
+                "product_name": "상품명", "option_name": "옵션명",
+                "set_qty": "구성개수", "size_tag": "사이즈",
+                "price_cny": "가격(위안화)", "image_url": "이미지주소", "memo": "메모",
+            })
+            buf = io.BytesIO()
+            export_df.to_excel(buf, index=False, engine="openpyxl")
+            st.download_button(
+                "등록대기 상품 엑셀 다운로드",
+                buf.getvalue(),
+                file_name="등록대기_상품목록.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 # ---------------------------------------------------------------------------
 # 5. 재고 데이터 업로드
