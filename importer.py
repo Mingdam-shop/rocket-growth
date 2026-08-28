@@ -2,8 +2,33 @@
 엑셀 파일(원본 워크북 형식 또는 쿠팡 다운로드 파일)을 읽어
 DB로 적재하는 함수 모음.
 """
+import time
 import pandas as pd
 from db import get_conn, commit as db_commit
+
+
+def _execute_batch_with_retry(sql, batch, retries=2, delay=1.0):
+    """배치를 새 연결로 실행하고 즉시 커밋한다.
+    Turso(원격 DB)는 가끔 일시적인 연결 끊김("stream not found" 등)이 발생할 수 있는데,
+    끊긴 연결을 그대로 재사용하면 다시 실패하므로, 실패 시 매번 완전히 새 연결을 맺어 재시도한다."""
+    last_err = None
+    for attempt in range(retries + 1):
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.executemany(sql, batch)
+            db_commit(conn)
+            conn.close()
+            return
+        except Exception as e:
+            last_err = e
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if attempt < retries:
+                time.sleep(delay)
+    raise last_err
 
 
 def _to_bool(v):
@@ -60,36 +85,37 @@ def import_product_master(file, sheet_name=0):
         if col not in df.columns:
             raise ValueError(f"필수 컬럼 누락: {col}")
 
-    conn = get_conn()
-    cur = conn.cursor()
-    count = 0
+    insert_sql = """
+        INSERT INTO products (
+            product_code, option_code, sample_code, set_qty, product_name,
+            option_name, image_url, supplier_1688_url, supplier_name_cn,
+            product_name_cn, option_name_cn, price_cny, size_tag,
+            strategic, discontinued, memo
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(option_code) DO UPDATE SET
+            product_code=excluded.product_code,
+            sample_code=excluded.sample_code,
+            set_qty=excluded.set_qty,
+            product_name=excluded.product_name,
+            option_name=excluded.option_name,
+            image_url=excluded.image_url,
+            supplier_1688_url=excluded.supplier_1688_url,
+            supplier_name_cn=excluded.supplier_name_cn,
+            product_name_cn=excluded.product_name_cn,
+            option_name_cn=excluded.option_name_cn,
+            price_cny=excluded.price_cny,
+            size_tag=excluded.size_tag,
+            strategic=excluded.strategic,
+            discontinued=excluded.discontinued,
+            memo=excluded.memo
+    """
+
+    # 먼저 전체 행을 정리해서 파라미터 리스트로 모은다 (행마다 네트워크 왕복하지 않기 위함).
+    params_list = []
     for _, row in df.iterrows():
         if pd.isna(row.get("option_code")):
             continue
-        cur.execute("""
-            INSERT INTO products (
-                product_code, option_code, sample_code, set_qty, product_name,
-                option_name, image_url, supplier_1688_url, supplier_name_cn,
-                product_name_cn, option_name_cn, price_cny, size_tag,
-                strategic, discontinued, memo
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(option_code) DO UPDATE SET
-                product_code=excluded.product_code,
-                sample_code=excluded.sample_code,
-                set_qty=excluded.set_qty,
-                product_name=excluded.product_name,
-                option_name=excluded.option_name,
-                image_url=excluded.image_url,
-                supplier_1688_url=excluded.supplier_1688_url,
-                supplier_name_cn=excluded.supplier_name_cn,
-                product_name_cn=excluded.product_name_cn,
-                option_name_cn=excluded.option_name_cn,
-                price_cny=excluded.price_cny,
-                size_tag=excluded.size_tag,
-                strategic=excluded.strategic,
-                discontinued=excluded.discontinued,
-                memo=excluded.memo
-        """, (
+        params_list.append((
             str(row.get("product_code") or ""),
             str(row.get("option_code")),
             _clean_text(row.get("sample_code")),
@@ -107,9 +133,16 @@ def import_product_master(file, sheet_name=0):
             _to_bool(row.get("discontinued")),
             _clean_text(row.get("memo")),
         ))
-        count += 1
-    db_commit(conn)
-    conn.close()
+
+    # 100건씩 나눠서 배치 전송한다. 각 배치는 독립적으로 커밋되고,
+    # 중간에 연결이 끊기면(예: "stream not found") 새 연결로 자동 재시도한다.
+    # ON CONFLICT ... DO UPDATE(upsert)라서 재시도해도 중복 없이 안전하다.
+    BATCH_SIZE = 100
+    for i in range(0, len(params_list), BATCH_SIZE):
+        batch = params_list[i:i + BATCH_SIZE]
+        _execute_batch_with_retry(insert_sql, batch)
+
+    count = len(params_list)
     return count
 
 
