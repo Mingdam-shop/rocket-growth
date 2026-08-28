@@ -12,6 +12,22 @@ def _to_bool(v):
     return bool(v)
 
 
+def _clean_text(v):
+    """빈 칸(NaN)은 None(=SQL NULL)으로, 값이 있으면 문자열로 변환.
+    Turso(원격 DB)는 텍스트 컬럼에 NaN 실수값이 그대로 들어가면 거부하므로 반드시 정리한다."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    return str(v)
+
+
+def _clean_num(v, default=0):
+    """빈 칸(NaN)은 기본값(0)으로 치환. Turso는 숫자(REAL/INTEGER) 컬럼에 NULL 대신
+    빈 값이 들어오면 타입 에러(JSON parse error: invalid type: null, expected f64)를 낸다."""
+    if v is None or pd.isna(v):
+        return default
+    return v
+
+
 def import_product_master(file, sheet_name=0):
     """
     '단일상품' 시트 형식의 엑셀을 읽어 products 테이블에 upsert.
@@ -76,20 +92,20 @@ def import_product_master(file, sheet_name=0):
         """, (
             str(row.get("product_code") or ""),
             str(row.get("option_code")),
-            row.get("sample_code"),
-            int(row["set_qty"]) if not pd.isna(row.get("set_qty")) else 1,
-            row.get("product_name"),
-            row.get("option_name"),
-            row.get("image_url"),
-            row.get("supplier_1688_url"),
-            row.get("supplier_name_cn"),
-            row.get("product_name_cn"),
-            row.get("option_name_cn"),
-            float(row["price_cny"]) if not pd.isna(row.get("price_cny")) else None,
-            row.get("size_tag"),
+            _clean_text(row.get("sample_code")),
+            int(_clean_num(row.get("set_qty"), 1)),
+            _clean_text(row.get("product_name")),
+            _clean_text(row.get("option_name")),
+            _clean_text(row.get("image_url")),
+            _clean_text(row.get("supplier_1688_url")),
+            _clean_text(row.get("supplier_name_cn")),
+            _clean_text(row.get("product_name_cn")),
+            _clean_text(row.get("option_name_cn")),
+            float(_clean_num(row.get("price_cny"), 0)),
+            _clean_text(row.get("size_tag")),
             _to_bool(row.get("strategic")),
             _to_bool(row.get("discontinued")),
-            row.get("memo"),
+            _clean_text(row.get("memo")),
         ))
         count += 1
     db_commit(conn)
